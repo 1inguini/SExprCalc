@@ -17,26 +17,6 @@ data SVal = Expr    Expr
           | List    Tree
           | SValError String
 
-data Expr = Add
-          | Sub
-          | Times
-          | Div
-          | Mod
-
-data Tree = Node [Tree]
-          | Leaf SVal
-
-showTree :: Tree -> String
-showTree (Leaf sval)  = showSVal sval
-showTree (Node trees) =
-  "< " ++ listToString " " (map showTree trees) ++ " >"
-
-parseTree :: Parser Tree
-parseTree = spaces >> (node <|> parsed)
-  where
-    node = Node <$> between (char '(') (char ')') (many1 parseTree)
-    leaf = many1 (oneOf "+-*/%" <|> digit) <|> sepBy1 space (many (noneOf "()"))
-    parsed = Leaf . sVal <$> leaf
 
 sVal :: String -> SVal
 sVal "+" = Expr Add
@@ -62,12 +42,80 @@ showSVal (Bool False)      = "false"
 showSVal (List tree)       = show tree
 showSVal (SValError str)   = "SValError: " ++ (init . tail) (show str)
 
+data Expr = Add
+          | Sub
+          | Times
+          | Div
+          | Mod
+
+data Tree = Node [Tree]
+          | Leaf SVal
+
 instance Show SVal where show = showSVal
 instance Show Tree where show = showTree
+
+showTree :: Tree -> String
+showTree (Leaf sval)  = showSVal sval
+showTree (Node trees) =
+  "< " ++ listToString " " (map showTree trees) ++ " >"
+
+parseTree :: Parser Tree
+parseTree = spaces >> (node <|> parsed)
+  where
+    node = Node <$> between (char '(') (char ')') (many1 parseTree)
+    leaf = many1 (oneOf "+-*/%" <|> digit) <|> sepBy1 space (many (noneOf "()"))
+    parsed = Leaf . sVal <$> leaf
+
+data Sexy = NonNorm  (SexyFunc, Sexy, Sexy)
+          | Norm     Types
+
+data SexyFunc = Arthmetic String -- (Integer -> Integer -> Integer)
+
+data Types = SexyInteger Integer
+           -- | SexyBool    Bool
+
+showSexyFunc :: SexyFunc -> String
+showSexyFunc (Arthmetic "+") = "(Function: addition)"
+showSexyFunc (Arthmetic "-") = "(Function: subtraction)"
+showSexyFunc (Arthmetic "*") = "(Function: mutiplication)"
+showSexyFunc (Arthmetic "/") = "(Function: division)"
+showSexyFunc (Arthmetic "%") = "(Function: modulo)"
+showSexyFunc (Arthmetic val) = "(Error: unknown function" ++ val ++ ")"
+instance Show SexyFunc where show = showSexyFunc
+
+showSexy :: Sexy -> String
+showSexy (NonNorm (sexyfunc, sexy1, sexy2)) =
+  showSexyFunc sexyfunc ++ " (Sexy: " ++ showSexy sexy1 ++ ") (Sexy: " ++ showSexy sexy2 ++ ")"
+showSexy (Norm types) = showTypes types
+instance Show Sexy where show = showSexy
+
+showTypes :: Types -> String
+showTypes (SexyInteger integer) = "(SexyInteger: " ++ show integer ++ ")"
+instance Show Types where show = showTypes
+
+parseSexy :: Parser Sexy
+parseSexy = -- spaces >> (node <|> parsed)
+  spaces >> (parseSexyNonNorm <|> parseSexyNorm)
+
+parseSexyNorm :: Parser Sexy
+parseSexyNorm = do
+  atom <- manyTill (digit <|> letter) ((Text.ParserCombinators.Parsec.try space) <|> (char ')'))
+  return $ Norm (SexyInteger (read atom))
+
+parseSexyNonNorm :: Parser Sexy
+parseSexyNonNorm = do
+  _ <- char '('
+  func  <- spaces >> manyTill anyToken (Text.ParserCombinators.Parsec.try space)
+  sexy1:_ <- spaces >> manyTill parseSexy
+    ((Text.ParserCombinators.Parsec.try space) <|> (Text.ParserCombinators.Parsec.try (char ')')))
+  sexy2:[] <- spaces >> manyTill parseSexy
+    ((Text.ParserCombinators.Parsec.try space) <|> (char ')'))
+  return $ NonNorm (Arthmetic func, sexy1, sexy2)
 
 main :: IO ()
 main = do
           args <- getArgs
           print $ head args
-          print (parse parseTree "" (head args))
+          parseTest parseTree (head args)
+          parseTest parseSexy (head args)
           -- print (listToken (head args))
