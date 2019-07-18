@@ -6,6 +6,7 @@ import           Data.List
 import           System.Environment
 import           Text.Parsec
 import           Text.ParserCombinators.Parsec
+import           Text.Pretty.Simple
 
 listToString :: String -> [String] -> String
 listToString seperator =
@@ -80,7 +81,7 @@ showSexyFunc (Arthmetic "-") = "(Function: subtraction)"
 showSexyFunc (Arthmetic "*") = "(Function: mutiplication)"
 showSexyFunc (Arthmetic "/") = "(Function: division)"
 showSexyFunc (Arthmetic "%") = "(Function: modulo)"
-showSexyFunc (Arthmetic val) = "(Error: unknown function" ++ val ++ ")"
+showSexyFunc (Arthmetic val) = "(Error: unknown function " ++ val ++ " )"
 instance Show SexyFunc where show = showSexyFunc
 
 showSexy :: Sexy -> String
@@ -99,7 +100,7 @@ parseSexy = -- spaces >> (node <|> parsed)
 
 parseSexyNorm :: Parser Sexy
 parseSexyNorm = do
-  atom <- manyTill (digit <|> letter) ((Text.ParserCombinators.Parsec.try space) <|> (char ')'))
+  atom <- many1 (digit <|> letter)
   return $ Norm (SexyInteger (read atom))
 
 parseSexyNonNorm :: Parser Sexy
@@ -116,6 +117,6 @@ main :: IO ()
 main = do
           args <- getArgs
           print $ head args
-          parseTest parseTree (head args)
+          pPrint (parse parseSexy "" (head args))
           parseTest parseSexy (head args)
           -- print (listToken (head args))
