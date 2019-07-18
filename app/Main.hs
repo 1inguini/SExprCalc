@@ -2,6 +2,7 @@ module Main where
 
 -- import           Lib
 import           System.Environment
+import           System.IO
 import           Text.Parsec
 import           Text.ParserCombinators.Parsec
 import           Text.Pretty.Simple
@@ -112,14 +113,31 @@ evalSexy sexy =
     NonNorm (sexyFunc, sexy1, sexy2) -> (evalSexyFunc sexyFunc) (evalSexy sexy1) (evalSexy sexy2)
     Norm  sexyInteger                -> Norm  sexyInteger
 
+
+flushStr :: String -> IO ()
+flushStr str = putStr str >> hFlush stdout
+
+repl :: IO ()
+repl = do
+  flushStr "SExprCalc >>> "
+  input <- getLine
+  flushStr $ show
+    $ evalSexy
+    $ case (parse parseSexy "" input) of
+    Right sexy -> sexy
+    Left err   -> Norm (TypeError (show err))
+  flushStr "\n"
+  repl
+
 main :: IO ()
 main = do
-          args <- getArgs
-          print $ head args
-          pPrint
-            $ evalSexy
-            $ case (parse parseSexy "" (head args)) of
-                Right sexy -> sexy
-                Left err   -> Norm (TypeError (show err))
-          parseTest parseSexy (head args)
-          -- print (listToken (head args))
+--           args <- getArgs
+--           putStrLn $ head args
+--           pPrint (parse parseSexy "" (head args))
+--           print
+--             $ evalSexy
+--             $ case (parse parseSexy "" (head args)) of
+--                 Right sexy -> sexy
+--                 Left err   -> Norm (TypeError (show err))
+--           -- print (listToken (head args))
+  repl
