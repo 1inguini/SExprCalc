@@ -1,20 +1,21 @@
 module Main where
 
 -- import           Lib
--- import           Text.Pretty.Simple
 -- import           System.Environment
 -- import qualified System.IO                     as IO
 import qualified Data.Either                   as E
 import qualified Data.Maybe                    as M
+import qualified Data.Text.Lazy                as TLazy
+import qualified Safe                          as Safe
 import qualified System.Console.Haskeline      as HLine
 import qualified Text.Parsec                   as P
 import qualified Text.ParserCombinators.Parsec as PCP
-
+import           Text.Pretty.Simple            as PrettyS
 
 data Sexy = NonNorm  (SexyFunc, Sexy, Sexy)
           | Norm     Value
 
-data SexyFunc = Arthmetic (String, (Sexy -> Sexy -> Sexy)) -- (Sexy -> Sexy -> Sexy) -- (Integer -> Integer -> Integer)
+data SexyFunc = Arthmetic (String, (Sexy -> Sexy -> Sexy))
               | UnknownFunc String
 
 data Value = SexyInteger Integer
@@ -94,16 +95,22 @@ parseSexyNonNorm :: PCP.Parser Sexy
 parseSexyNonNorm = do
   _ <- PCP.char '('
   funcKey <- PCP.spaces >> PCP.manyTill PCP.anyToken (PCP.try PCP.space)
-  sexy1:_ <- PCP.spaces >> PCP.manyTill parseSexy
-    ((PCP.try PCP.space) PCP.<|> (PCP.try (PCP.char ')')))
-  sexy2:[] <- PCP.spaces >> PCP.manyTill parseSexy
-    ((PCP.try PCP.space) PCP.<|> (PCP.char ')'))
-
-  let sexyFunc = case lookup funcKey sexyFuncs of
+  sexy0:sexy1:empty <- PCP.spaces >> parseSexy `PCP.manyTill` (PCP.try (PCP.char ')'))
+  let
+    sexyFunc = case lookup funcKey sexyFuncs of
                   Just funcKeyhole -> (funcKey, funcKeyhole)
                   Nothing          -> (funcKey, sexyUnkownFunc)
+    -- arg0 = case PCP.parse parseSexy "" sexy0 of
+    --          Right val -> val
+    --          Left  val -> (Norm . SexyError . show) val
+    -- arg1 = case PCP.parse parseSexy "" sexy1 of
+    --          Right val -> val
+    --          Left  val -> (Norm . SexyError . show) val
     in
-    return $ NonNorm (Arthmetic sexyFunc, sexy1, sexy2)
+    return $ case (Safe.headMay empty) of
+               Nothing -> NonNorm (Arthmetic sexyFunc, sexy0, sexy1)
+               Just _  -> (Norm . SexyError)
+                 $ "(Error: " ++ show (Arthmetic sexyFunc) ++ " took arguments other than " ++ show sexy0 ++ " " ++ show sexy1 ++ ", which are " ++ (foldl1 (\xs x -> xs ++ " " ++ x) (map show empty))
 
 parseSexyNorm :: PCP.Parser Sexy
 parseSexyNorm = do
@@ -134,7 +141,7 @@ repl = do
        -- Just theInput -> theInput
        -- Nothing       -> "Error: failed getting input"
     in
-    HLine.outputStrLn $ show
+    HLine.outputStrLn $ TLazy.unpack $ PrettyS.pShow
     $ evalSexy
     $ E.either (Norm . SexyError . show) id $ P.parse parseSexy "" input
       -- case (parse parseSexy "" input) of
