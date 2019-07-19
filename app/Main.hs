@@ -3,12 +3,13 @@ module Main where
 -- import           Lib
 -- import           System.Environment
 -- import qualified System.IO                     as IO
+-- import qualified Safe                          as Safe
+-- import qualified Data.Maybe                    as M
 import qualified Data.Either                   as E
-import qualified Data.Maybe                    as M
 import qualified Data.Text.Lazy                as TLazy
-import qualified Safe                          as Safe
 import qualified System.Console.Haskeline      as HLine
 import qualified Text.Parsec                   as P
+import           Text.ParserCombinators.Parsec ((<|>))
 import qualified Text.ParserCombinators.Parsec as PCP
 import           Text.Pretty.Simple            as PrettyS
 
@@ -20,6 +21,7 @@ data SexyFunc = Arthmetic (String, (Sexy -> Sexy -> Sexy))
 
 data Value = SexyInteger Integer
            | SexyError   String
+           | EOF
            -- | SexyBool    Bool
 
 sexyFuncs :: [(String, Sexy -> Sexy -> Sexy)]
@@ -84,18 +86,20 @@ instance Show Sexy where show = showSexy
 showValue :: Value -> String
 showValue (SexyInteger integer) = "(SexyInteger: " ++ show integer ++ ")"
 showValue (SexyError err)       = "(SexyError: " ++ err ++ ")"
+showValue EOF                   = "(EOF: end of file)"
 
 instance Show Value where show = showValue
 
 parseSexy :: PCP.Parser Sexy
-parseSexy = -- spaces >> (node <|> parsed)
-  PCP.spaces >> (parseSexyNonNorm PCP.<|> parseSexyNorm)
+parseSexy = do -- spaces >> (node <|> parsed)
+  do {PCP.eof; return $ Norm EOF} <|> (PCP.spaces >> (parseSexyNonNorm <|> parseSexyNorm))
 
 parseSexyNonNorm :: PCP.Parser Sexy
 parseSexyNonNorm = do
   _ <- PCP.char '('
   funcKey <- PCP.spaces >> PCP.manyTill PCP.anyToken (PCP.try PCP.space)
-  sexy0:sexy1:empty <- PCP.spaces >> parseSexy `PCP.manyTill` (PCP.try (PCP.char ')'))
+  sexy0:sexy1:empty <- PCP.spaces >> (PCP.between (PCP.spaces) (PCP.spaces) (parseSexy)
+                                      <|> (PCP.spaces >> parseSexy)) `PCP.manyTill` (PCP.char ')')
   let
     sexyFunc = case lookup funcKey sexyFuncs of
                   Just funcKeyhole -> (funcKey, funcKeyhole)
@@ -107,16 +111,16 @@ parseSexyNonNorm = do
     --          Right val -> val
     --          Left  val -> (Norm . SexyError . show) val
     in
-    return $ case (Safe.headMay empty) of
-               Nothing -> NonNorm (Arthmetic sexyFunc, sexy0, sexy1)
-               Just _  -> (Norm . SexyError)
-                 $ "(Error: " ++ show (Arthmetic sexyFunc) ++ " took arguments other than " ++ show sexy0 ++ " " ++ show sexy1 ++ ", which are " ++ (foldl1 (\xs x -> xs ++ " " ++ x) (map show empty))
+    return $ if null empty
+             then NonNorm (Arthmetic sexyFunc, sexy0, sexy1)
+             else (Norm . SexyError)
+                  $ "(Error: " ++ show (Arthmetic sexyFunc) ++ " took arguments other than " ++ show sexy0 ++ " " ++ show sexy1 ++ ", which are " ++ (foldl1 (\xs x -> xs ++ " " ++ x) (map show empty))
 
 parseSexyNorm :: PCP.Parser Sexy
-parseSexyNorm = do
-  atom <- PCP.many1 (PCP.digit PCP.<|> PCP.letter)
-
-  return $ Norm (SexyInteger (read atom))
+parseSexyNorm =
+  do {(Norm . SexyInteger . read) <$> PCP.try (PCP.many1 PCP.digit)}
+  <|>
+  do {(Norm . SexyError . \string -> string ++ " is not an integer") <$> PCP.try (PCP.many1 PCP.letter)}
 
 evalSexyFunc :: SexyFunc -> (Sexy -> Sexy -> Sexy)
 evalSexyFunc (Arthmetic (_, sexyFunc)) = sexyFunc
@@ -128,26 +132,29 @@ evalSexy sexy =
     NonNorm (sexyFunc, sexy1, sexy2) -> (evalSexyFunc sexyFunc) (evalSexy sexy1) (evalSexy sexy2)
     val@(Norm (SexyInteger _))       -> val
     val@(Norm (SexyError _))         -> val
+    val@(Norm EOF)                   -> val
 
 
 -- flushStr :: String -> IO ()
 -- flushStr str = putStr str >> IO.hFlush IO.stdout
 
-repl :: HLine.InputT IO ()
-repl = do
-  maybeInput <- HLine.getInputLine "(SexyEval: )>>> "
-  let input = "Error: failed getting input" `M.fromMaybe` maybeInput
-       -- case maybeInput of
-       -- Just theInput -> theInput
-       -- Nothing       -> "Error: failed getting input"
-    in
-    HLine.outputStrLn $ TLazy.unpack $ PrettyS.pShow
-    $ evalSexy
-    $ E.either (Norm . SexyError . show) id $ P.parse parseSexy "" input
+rep :: Maybe String -> HLine.InputT IO ()
+rep (Just input) = do
+    (HLine.outputStrLn . TLazy.unpack . PrettyS.pShow)
+      $ evalSexy
+      $ E.either (Norm . SexyError . show) id $ P.parse parseSexy "" input
       -- case (parse parseSexy "" input) of
       --   Right sexy -> sexy
       --   Left err   -> (Norm . SexyError) (show err)
-  repl
+    repl
+rep Nothing = do
+  HLine.outputStrLn . TLazy.unpack . PrettyS.pString $ "(SexyFarewell: Bye!)"
+  return ()
+
+repl :: HLine.InputT IO ()
+repl = do
+  maybeInput <- HLine.getInputLine "(SexyEval: )>>> "
+  rep maybeInput
 
 main :: IO ()
 main = do
