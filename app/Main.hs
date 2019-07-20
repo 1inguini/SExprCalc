@@ -169,14 +169,11 @@ evalSexy e sexy =
       (\(x, y, z) -> evalSexyFunc sexyFunc x y z)
       (case ((evalSexy e sexy1), (evalSexy e sexy2)) of
          ((env0, val0), (env1, val1)) -> ((Map.unions [e, env0, env1]), val0, val1))
-    val@(Norm (SexyInteger _))       -> (e, val)
-    val@(Norm (SexyError _))         -> (e, val)
+    val@(Norm (SexyInteger _))    -> (e, val)
+    val@(Norm (SexyError _))      -> (e, val)
     val@(Norm (SexyAtom sexyKey)) ->
-      case Map.lookup sexyKey e of
-          Just innard -> (e, innard)
-          Nothing     -> (e, -- (Norm . SexyError $ "value not binded to" ++ sexyKey)
-                         val)
-    val@(Norm EOF)                   -> (e, val)
+      May.maybe (e, val) (\x -> (evalSexy e x)) $ Map.lookup sexyKey e
+    val@(Norm EOF)                -> (e, val)
 
 
 -- flushStr :: String -> IO ()
