@@ -4,6 +4,7 @@ module Main where
 -- import qualified Data.IORef                    as IORef
 -- import qualified System.IO                     as IO
 import qualified Data.Either                   as E
+import qualified Data.List                     as List
 import           Data.Map.Strict               ((!?))
 import qualified Data.Map.Strict               as Map
 import qualified Data.Maybe                    as May
@@ -18,312 +19,276 @@ import qualified Text.Pretty.Simple            as PrettyS
 
 type SexyKey = String
 
-type SexyEnv = Map.Map SexyKey Sexy
+type SexyEnv = (Map.Map SexyKey Sexy)
 
-type SexyReturn = (SexyEnv, Sexy)
+data Sexy = NonNorm  (Sexy, Sexy, Sexy)
+          | SexyFunction (SexyEnv -> Sexy -> Sexy -> (SexyEnv, Sexy))
+          | SexySpecialForm (SexyEnv -> Sexy -> Sexy -> (SexyEnv, Sexy))
+          | SexyClosure (SexyKey, SexyEnv -> Sexy -> Sexy -> (SexyEnv, Sexy))
+          | SexyAtom     SexyKey
+          | SexyInteger  Integer
+          | SexyText     TLazy.Text
+          | SexyBool     Bool
+          | SexyCouple   (Sexy, Sexy)
+          | SexyVoid
+          | SexyError String
+          | EOF
 
-data SexyError = Message String
-               | EOF
+sexyFuncs :: Map.Map SexyKey Sexy
+sexyFuncs = Map.fromList
+  $ [ ("+", SexyFunction sexyAdd)
+    , ("-", SexyFunction sexySub)
+    , ("*", SexyFunction sexyMulti)
+    , ("/", SexyFunction sexyDiv)
+    , ("%", SexyFunction sexyMod)
+    , ("if", SexyFunction sexyIf)
+    , ("?", SexyFunction sexyIsSuccess)
+    , ("eval", SexyFunction sexyEvalText)
+    -- , ("@", SexyFunction sexyBind)
+    -- , ("@", sexyEvalBind)
+    -- , ("d", SexyFunction sexyDeBind)
+    , ("couple", SexyFunction sexyCouple)
+    -- , (".", SexyFunction sexyCouple)
+    , ("do", SexySpecialForm sexyDo)
+    , ("let", SexySpecialForm sexyLet)
+    -- , ("text", sexyTextConstructer)
+    ]
 
-data Sexy = NonNorm  (SexyCommand, Sexy, Sexy)
-          | Norm     (Either SexyError Value)
+symbol :: PCP.Parser Char
+symbol = PCP.oneOf "!#$%&|*+-/:<=>?@^~"
 
-data SexyCommand = Function    (SexyKey, (SexyEnv -> Sexy -> Sexy -> SexyReturn))
-                 | SpecialForm (SexyKey, (SexyEnv -> Sexy -> Sexy -> SexyReturn))
-                 | UnknownCommand String
+parseSexy, parseNonNorm, parseCouple, parseAtom, parseInteger, parseText, parseBool, parseVoid
+  :: PCP.Parser Sexy
 
-data Value = SexyAtom    SexyKey
-           | SexyInteger Integer
-           | SexyText    TLazy.Text
-           | SexyBool    Bool
-           | SexyCouple   (Sexy, Sexy)
-           | SexyVoid
-           -- | EOF
+parseSexy = PCP.spaces >>
+  PCP.choice [ PCP.try parseNonNorm
+             , PCP.try parseCouple
+             , PCP.try parseAtom
+             , PCP.try parseInteger
+             , PCP.try parseText
+             , PCP.try parseBool
+             , PCP.try parseVoid ]
 
-sexyFuncs :: Map.Map SexyKey (SexyEnv -> Sexy -> Sexy -> SexyReturn)
-sexyFuncs = Map.fromList [("+", sexyAdd),
-                          ("-", sexySub),
-                          ("*", sexyMulti),
-                          ("/", sexyDiv),
-                          ("%", sexyMod),
-                          ("if", sexyIf),
-                          ("?", sexyIsSuccess)]
+parseNonNorm = do
+  _       <- PCP.spaces >> PCP.char '('
+  command <- PCP.spaces >> parseAtom
+  arg0    <- PCP.spaces >> parseSexy
+  arg1    <- PCP.spaces >> parseSexy
+  _       <- PCP.spaces >> PCP.char ')'
+  return $ NonNorm (command, arg0, arg1)
 
-sexySForms :: Map.Map SexyKey (SexyEnv -> Sexy -> Sexy -> SexyReturn)
-sexySForms = Map.fromList [("@", sexyBind),
-                           ("eval@", sexyEvalBind),
-                           ("do", sexyDo),
-                           ("d", sexyDeBind),
-                           ("couple", sexyCouple),
-                           (".", sexyCouple),
-                           ("text", sexyTextConstructer)
-                           -- ("eval", sexyEval)
-                          ]
+parseCouple = do
+  _       <- PCP.spaces >> PCP.char '('
+  _ <- PCP.spaces >> PCP.char '.'
+  arg0    <- PCP.spaces >> parseSexy
+  arg1    <- PCP.spaces >> parseSexy
+  _       <- PCP.spaces >> PCP.char ')'
+  return $ SexyCouple (arg0, arg1)
 
-sexyCommands :: Map.Map SexyKey (SexyEnv -> Sexy -> Sexy -> SexyReturn)
-sexyCommands = Map.unions [sexyFuncs, sexySForms]
+-- parseCommand = do
+--   atom <- P.try $ PCP.choice
+--           $ map (P.try . PCP.string) (List.reverse . List.sort . Map.keys $ sexyFuncs)
+--   return $ May.fromJust $ Map.lookup atom sexyFuncs
 
-sexyReserved :: Map.Map SexyKey Sexy
-sexyReserved = Map.fromList [("_", Norm . Right $ SexyVoid),
-                             ("T", Norm . Right . SexyBool $ True),
-                             ("F", Norm . Right . SexyBool $ False)]
+parseAtom =
+  PCP.try $ do
+    x <- PCP.letter
+    xs <- PCP.many $ PCP.try PCP.letter <|> PCP.try PCP.digit <|> symbol
+    return $ SexyAtom $ x:xs
+  <|> SexyAtom <$> PCP.many1 symbol
 
-sexyAdd :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexyAdd e (Norm (Right (SexyInteger val1))) (Norm (Right (SexyInteger val2))) =
-  (e, Norm . Right . SexyInteger $ val1 + val2)
+-- parseAtom = SexyAtom <$> PCP.many1 (PCP.noneOf " )")
+
+parseInteger = do
+  -- x  <- P.try (PCP.char '+') <|> PCP.char '-'
+  xs <- PCP.many1 $ PCP.try PCP.digit
+  return $ SexyInteger . read $ xs
+
+parseText = do
+  SexyText . TLazy.pack
+    <$> PCP.between (PCP.char '"') (PCP.char '"')
+    (PCP.many (PCP.try parseEscape
+               <|> PCP.noneOf "\""))
+  where
+    parseEscape :: PCP.Parser Char
+    parseEscape = do
+      _ <- PCP.char '\\'
+      PCP.anyToken
+
+parseBool = do
+  tOrF <- PCP.oneOf "TF"
+  return . SexyBool
+    $ case tOrF of
+        'T' -> True
+        _   -> False
+
+parseVoid = do
+  _ <- PCP.char '_'
+  return SexyVoid
+
+sexyAdd, sexySub, sexyMulti, sexyDiv, sexyMod, sexyIf, sexyIsSuccess, sexyLet, sexyDo, sexyCouple
+  :: SexyEnv -> Sexy -> Sexy -> (SexyEnv, Sexy)
+
+sexyAdd e (SexyInteger val1) (SexyInteger val2) =
+  (e, SexyInteger $ val1 + val2)
 sexyAdd e arg0 arg1 =
-  (e, Norm . Left . Message $ "failed at addition of " ++ show arg0 ++ " and " ++ show arg1)
+  (e, SexyError $ "failed at addition of " ++ show arg0 ++ " and " ++ show arg1)
 
-sexySub  :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexySub e (Norm (Right (SexyInteger arg0))) (Norm (Right (SexyInteger arg1))) =
-  (e, Norm . Right . SexyInteger $ arg0 - arg1)
+sexySub e (SexyInteger arg0) (SexyInteger arg1) =
+  (e, SexyInteger $ arg0 - arg1)
 sexySub e arg0 arg1 =
-  (e, Norm . Left . Message $ "failed at subtraction of " ++ show arg0 ++ " by " ++ show arg1)
+  (e, SexyError $ "failed at subtraction of " ++ show arg0 ++ " by " ++ show arg1)
 
-sexyMulti :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexyMulti e (Norm (Right (SexyInteger arg0))) (Norm (Right (SexyInteger arg1))) =
-  (e, Norm . Right . SexyInteger $ arg0 * arg1)
+sexyMulti e (SexyInteger arg0) (SexyInteger arg1) =
+  (e, SexyInteger $ arg0 * arg1)
 sexyMulti e arg0 arg1 =
-  (e, Norm . Left . Message $ "failed at muliplication of " ++ show arg0 ++ " and " ++ show arg1)
+  (e, SexyError $ "failed at muliplication of " ++ show arg0 ++ " and " ++ show arg1)
 
-sexyDiv :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexyDiv e (Norm (Right (SexyInteger arg0))) (Norm (Right (SexyInteger arg1))) =
-  (e, Norm . Right . SexyInteger $ div arg0 arg1)
+sexyDiv e (SexyInteger arg0) (SexyInteger arg1) =
+  (e, SexyInteger $ div arg0 arg1)
 sexyDiv e arg0 arg1 =
-  (e, Norm . Left . Message $ "failed at division of " ++ show arg0 ++ " by " ++ show arg1)
+  (e, SexyError $ "failed at division of " ++ show arg0 ++ " by " ++ show arg1)
 
-sexyMod :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexyMod e (Norm (Right (SexyInteger arg0))) (Norm (Right (SexyInteger arg1))) =
-  (e, Norm . Right . SexyInteger $ mod arg0 arg1)
+sexyMod e (SexyInteger arg0) (SexyInteger arg1) =
+  (e, SexyInteger $ mod arg0 arg1)
 sexyMod e arg0 arg1 =
-  (e, Norm . Left . Message $ "failed to yield the remainder from division of " ++ show arg0 ++ " by " ++ show arg1)
+  (e, SexyError $ "failed to yield the remainder from division of " ++ show arg0 ++ " by " ++ show arg1)
 
-sexyIf :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexyIf e (Norm (Right (SexyBool bool))) (Norm (Right (SexyCouple (thethen, theelse)))) =
-  if bool then (evalSexy e thethen) else (evalSexy e theelse)
+sexyIf e (SexyBool bool) (SexyCouple (thethen, theelse)) =
+  if bool then ((evalSexy e thethen)) else (evalSexy e theelse)
 sexyIf e arg0 arg1 =
-  (e, Norm . Left . Message $ "the first arg was " ++ show arg0 ++ " but the second argument were not SexyCouple but " ++ show arg1)
+  (e, SexyError $ "the first arg was " ++ show arg0 ++ " but the second argument were not SexyCouple but " ++ show arg1)
 
-sexyIsSuccess :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexyIsSuccess e (Norm (Right SexyVoid)) (Norm sexy) =
-  (e, Norm . Right $ case sexy of
-                   Right _ -> SexyBool True
-                   Left _  -> SexyBool False)
+sexyIsSuccess e SexyVoid sexy =
+  (e, case sexy of
+      SexyError _ -> SexyBool False
+      _           -> SexyBool True)
 sexyIsSuccess e arg0 arg1 =
-  (e, Norm . Left . Message $ "the first argument is not SexyVoid but " ++ show arg0 ++ "; the second argument is " ++ show arg1)
+  (e, SexyError $ "the first argument is not SexyVoid but " ++ show arg0 ++ "; the second argument is " ++ show arg1)
+
+sexyEvalText :: SexyEnv -> Sexy -> Sexy -> (SexyEnv, Sexy)
+sexyEvalText e SexyVoid (SexyText code) =
+  (evalSexy e $ E.either (SexyError . show) id $ P.parse parseSexy "" (TLazy.unpack code))
+sexyEvalText e SexyVoid arg1 =
+  (e, SexyError
+    $ "the first argument was SexyVoid but the second argument was not SexyText but " ++ show arg1)
+sexyEvalText e arg0 arg1 =
+  (e, SexyError
+    $ "the first argument is not SexyVoid but " ++ show arg0 ++ "; the second argument is " ++ show arg1)
 
 setSexyVar :: SexyEnv -> SexyKey -> Sexy -> SexyEnv
-setSexyVar sexyEnv sexyKey sexyToBeBounded =
-  Map.insert sexyKey sexyToBeBounded sexyEnv
+setSexyVar e sexyKey sexyToBeBounded =
+  Map.insert sexyKey sexyToBeBounded e
 
 defineSexyVar :: SexyEnv -> SexyKey -> Sexy -> Either Sexy SexyEnv
 defineSexyVar e sexyKey sexyToBeBounded =
   May.maybe
   (Right $ Map.insert sexyKey sexyToBeBounded e)
-  (\x -> Left . Norm . Left . Message $ show x ++ " already binded")
-  ((Map.unions [sexyReserved , e]) !? sexyKey)
-
-sexyBind :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexyBind e arg0@(Norm (Left _)) arg1@(Norm (Right (SexyAtom _))) =
-  (e, Norm . Left . Message $ "failed at binding of " ++ show arg0 ++ " by " ++ show arg1)
-sexyBind e sexy (Norm (Right (SexyAtom sexyKey))) =
-  E.either (\v -> (e, (Norm . Left . Message . show $ v))) (\x -> (x ,sexy))
-  $ defineSexyVar e sexyKey sexy
-sexyBind e arg0 arg1 =
-  (e, Norm . Left . Message $ "failed at binding of " ++ show arg0 ++ " by " ++ show arg1)
-
-sexyEvalBind :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexyEvalBind e arg0 arg1 =
-  case (evalSexy e arg0) of
-    (_, evaluated) -> sexyBind e evaluated arg1
+  (\x -> Left . SexyError $ show x ++ " already binded")
+  (e !? sexyKey)
 
 
-sexyDeBind :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexyDeBind e (Norm (Right (SexyVoid))) var@(Norm (Right (SexyAtom sexyKey))) =
-  if May.isJust (e !? sexyKey)
-  then ((Map.delete sexyKey e), var)
-  else (e, (Norm . Left . Message $ sexyKey ++ " is not binded"))
-sexyDeBind e (Norm (Right SexyVoid)) arg1 =
-  (e, (Norm . Left . Message) $ "failed at deleting binding of by " ++ show arg1)
-sexyDeBind e arg0 val@(Norm (Right (SexyAtom _))) =
-  (e, (Norm . Left . Message)
-    $ "failed at deleting binding because the arguments was "
-    ++ show arg0 ++ " and " ++ show val
-    ++ "; the first argument should be SexyVoid")
-sexyDeBind e arg0 arg1 =
-  (e, (Norm . Left . Message)
-    $ "failed at deleting binding because the arguments was not SexyVoid and some atom but "
-    ++ show arg0 ++ " and " ++ show arg1)
-
-sexyDo :: SexyEnv -> Sexy -> Sexy -> SexyReturn
 sexyDo e arg0@(NonNorm _) arg1@(NonNorm _) =
   case (evalSexy e arg0) of
-    (_, sexy@(Norm (Left _))) ->
-      (e, Norm . Left . Message $ "failed doing "
+    (_, sexy@(SexyError _)) ->
+      (e, SexyError $ "failed doing "
         ++ show arg0 ++ " with error " ++ show sexy
         ++ " before doing " ++ show arg1)
     (env0, _) -> (evalSexy env0 arg1)
 sexyDo e arg0 arg1 =
-  (e, (Norm . Left . Message)
+  (e, SexyError
     $ "failed at doing " ++ show arg0 ++ " and " ++ show arg1)
 
-sexyCouple :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexyCouple e (Norm (Left (Message err))) sexy1 =
-  (e, (Norm . Left . Message) $ "can't make couple with " ++ err ++ " and " ++ show sexy1)
-sexyCouple e sexy0 (Norm (Left (Message err))) =
-  (e, (Norm . Left . Message) $ "can't make couple with " ++ show sexy0 ++ " and " ++ err)
+sexyCouple e (SexyError err) sexy1 =
+  (e, SexyError $ "can't make couple with " ++ err ++ " and " ++ show sexy1)
+sexyCouple e sexy0 (SexyError err) =
+  (e, SexyError $ "can't make couple with " ++ show sexy0 ++ " and " ++ err)
 sexyCouple e sexy0 sexy1 =
-  (e, (Norm . Right . SexyCouple) (sexy0, sexy1))
+  (e, SexyCouple (sexy0, sexy1))
 
--- sexyEval :: SexyEnv -> Sexy -> Sexy -> SexyReturn
--- sexyEval e =
+sexyLet e (SexyCouple (SexyAtom key, sexyToBeBounded@(SexyError _))) arg1 =
+  (e, SexyError
+    $ "failed at binding of " ++ show sexyToBeBounded ++ " by " ++ show key ++ " and failed to do " ++ show arg1)
+sexyLet e (SexyCouple (SexyAtom key, sexyToBeBounded)) sexy =
+  E.either (\v -> (e, (SexyError . show $ v))) (\x -> (evalSexy x sexy))
+  $ defineSexyVar e key sexyToBeBounded
+sexyLet e arg0 arg1 =
+  (e, SexyError
+    $ "the 1st argument was not SexyCouple but " ++ show arg0 ++ " and the 2nd argument was " ++ show arg1)
 
-sexyTextConstructer :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexyTextConstructer e (Norm (Right SexyVoid)) (Norm (Right (SexyAtom arg1))) =
-  (e, (Norm . Right . SexyText . TLazy.pack) $ arg1)
-sexyTextConstructer e arg0 (Norm (Right (SexyAtom arg1))) =
-  (e, (Norm . Left . Message)
-    $ "the first argument should be SexyVoid but was "
-    ++ show arg0
-    ++ "; failed to construct text from " ++ arg1)
-sexyTextConstructer e arg0 arg1 =
-  (e, (Norm . Left . Message)
-    $ "failed at deleting binding because the arguments was not SexyVoid and some atom but "
-    ++ show arg0 ++ " and " ++ show arg1)
-
-
-
-sexyUnkownFunc :: SexyEnv -> Sexy -> Sexy -> SexyReturn
-sexyUnkownFunc e arg0 arg1 =
-  (e, (Norm . Left. Message) $ " Unknown function applied to " ++ show arg0 ++ " and " ++ show arg1 ++ ")")
 
 showSexy :: Sexy -> String
-showSexy (NonNorm (sexyfunc, sexy1, sexy2)) =
-  showSexyCommand sexyfunc ++ " (Sexy: " ++ showSexy sexy1 ++ ") (Sexy: " ++ showSexy sexy2 ++ ")"
-showSexy (Norm (Right value)) = "(Value: " ++ show value ++ ")"
-showSexy (Norm (Left value)) = "(SexyError: " ++ show value ++ ")"
+-- showSexy (SexyCommand ("+", Function _))    = "(Function: addition)"
+-- showSexy (SexyCommand ("-", Function _))    = "(Function: subtraction)"
+-- showSexy (SexyCommand ("*", Function _))    = "(Function: mutiplication)"
+-- showSexy (SexyCommand ("/", Function _))    = "(Function: division)"
+-- showSexy (SexyCommand ("%", Function _))    = "(Function: modulo)"
+-- showSexy (SexyCommand (val, Function _))    = "(Function: " ++ val ++ ")"
+-- showSexy (SexyCommand ("&", SpecialForm _)) = "(SpecialForm: don't evaluate the first argument and bind)"
+-- showSexy (SexyCommand ("@", SpecialForm _)) = "(SpecialForm: evaluate the first argument and bind)"
+-- showSexy (SexyCommand ("d", SpecialForm _))   = "(SpecialForm: debind)"
+-- showSexy (SexyCommand (val, SpecialForm _))   = "(SpecialForm: " ++ val ++ ")"
+-- showSexy (SexyCommand (func, UnknownCommand)) = "(UnknownCommand: " ++ func ++ ")"
+-- showSexy (LazyNonNorm  (func, arg0, arg1)) =
+--   "(LazyNonNorm: " ++ showSexy func ++ " " ++ show arg0 ++ " " ++ show arg1 ++")"
+showSexy (NonNorm  (func, arg0, arg1)) =
+  "(NonNorm: " ++ showSexy func ++ " " ++ show arg0 ++ " " ++ show arg1 ++")"
+showSexy (SexyFunction _)              = "(SexyFunction)"
+showSexy (SexySpecialForm _)              = "(SexySpecialForm)"
+showSexy (SexyAtom sexyKey)            = "(SexyAtom: " ++ sexyKey ++ ")"
+showSexy (SexyInteger integer)         = "(SexyInteger: " ++ show integer ++ ")"
+showSexy (SexyText text)               = "(SexyText: " ++ show text ++ ")"
+showSexy (SexyBool bool)               = "(SexyBool: " ++ show bool ++ ")"
+showSexy (SexyCouple (sexy0, sexy1))   = "(SexyCouple: (" ++ show sexy0 ++ ", " ++ show sexy1++ "))"
+showSexy SexyVoid                      = "(SexyVoid: nothing here)"
+showSexy (SexyError err)               = "(SexyError: " ++ err ++ ")"
+showSexy EOF                           = "(EOF: end of file)"
 
 instance Show Sexy where show = showSexy
 
-showSexyCommand :: SexyCommand -> String
-showSexyCommand (Function ("+", _))    = "(Function: addition)"
-showSexyCommand (Function ("-", _))    = "(Function: subtraction)"
-showSexyCommand (Function ("*", _))    = "(Function: mutiplication)"
-showSexyCommand (Function ("/", _))    = "(Function: division)"
-showSexyCommand (Function ("%", _))    = "(Function: modulo)"
-showSexyCommand (Function (val, _))    = "(Function: " ++ val ++ ")"
-showSexyCommand (SpecialForm ("@", _)) = "(SpecialForm: bind)"
-showSexyCommand (SpecialForm ("d", _)) = "(SpecialForm: debind)"
-showSexyCommand (SpecialForm (val, _)) = "(SpecialForm: " ++ val ++ ")"
-showSexyCommand (UnknownCommand func)  = "(Unknown function: " ++ func ++ ")"
+-- matchSexyCommand :: SexyKey -> Value -- (SexyEnv -> Sexy -> Sexy -> (SexyEnv ,Sexy))
+-- matchSexyCommand key = SexyCommand
+--                        $ case (Map.lookup key sexyFuncs, Map.lookup key sexySForms) of
+--                            (Nothing, Just spForm) -> (key, spForm)
+--                            (Just func, _)         -> (key, func)
+--                            (_, _)                 -> (key, UnknownCommand)
+-- -- evalSexyCommand (Function (_, sexyFunc))  = sexyFunc
+-- -- evalSexyCommand (SpecialForm (_, spForm)) = spForm
+-- -- evalSexyCommand (UnknownCommand _)        = sexyUnkownFunc
 
-instance Show SexyCommand where show = showSexyCommand
-
-showValue :: Value -> String
-showValue (SexyAtom sexyKey)          = "(SexyAtom: " ++ sexyKey ++ ")"
-showValue (SexyInteger integer)       = "(SexyInteger: " ++ show integer ++ ")"
-showValue (SexyText text)             = "(SexyText: " ++ show text ++ ")"
-showValue (SexyBool bool)             = "(SexyBool: " ++ show bool ++ ")"
-showValue (SexyCouple (sexy0, sexy1)) = "(SexyCouple: (" ++ show sexy0 ++ ", " ++ show sexy1++ "))"
-showValue SexyVoid                    = "(SexyVoid: nothing here)"
-
-instance Show Value where show = showValue
-
-showSexyError :: SexyError -> String
-showSexyError (Message err) = "(Message: " ++ err ++ ")"
-showSexyError EOF           = "(EOF: end of file)"
-
-instance Show SexyError where show = showSexyError
-
-parseSexy :: PCP.Parser Sexy
-parseSexy = do -- spaces >> (node <|> parsed)
-     (do { PCP.eof
-         ; return $ (Norm . Left) EOF})
-       <|>
-       (PCP.spaces >>
-            (parseSexyNonNorm <|> parseSexyNorm))
-
-parseSexyNonNorm :: PCP.Parser Sexy
-parseSexyNonNorm = do
-  _ <- PCP.char '('
-  commKey <- PCP.spaces >>
-    do { x <- PCP.anyToken
-       ; xs <- ((PCP.letter <|> (PCP.oneOf (foldl1 (++) $ Map.keys sexyCommands)))
-                 `PCP.manyTill` (PCP.lookAhead
-                                  (P.try
-                                    ((PCP.many1 PCP.space)
-                                      <|> (P.try (PCP.many1 $ PCP.char '('))
-                                      <|> (P.try (PCP.many1 PCP.digit))
-                                      <|> (P.try (PCP.choice $ map PCP.string (Map.keys sexyReserved)))))))
-       ; return $ x:xs}
-  args <- ((do {x <- PCP.spaces >> parseSexy
-               ; PCP.spaces
-               ; return x})
-            `PCP.manyTill` PCP.char ')')
-  let
-    sexyComm = case ((Map.lookup commKey sexyFuncs), (Map.lookup commKey sexySForms)) of
-                 (Just commKeyhole, _) -> (Function (commKey, commKeyhole))
-                 (_, Just commKeyhole) -> (SpecialForm (commKey, commKeyhole))
-                 (_, _)    -> (UnknownCommand $ commKey)
-    in
-    return $ case length args of
-               2 -> NonNorm (sexyComm,
-                             (May.fromMaybe (Norm . Left . Message $ "how can ths be error?") $ Safe.headMay args),
-                             (May.fromMaybe (Norm . Left . Message$ "how can ths be error?") $ Safe.lastMay args))
-               thelength -> (Norm . Left . Message)
-                            $ show sexyComm ++ " took not 2 arguments but " ++ show thelength
-                            ++ (foldl (\xs x -> xs ++ " " ++ x) " arguments:" $ map show args)
-
-parseSexyNorm :: PCP.Parser Sexy
-parseSexyNorm = do
-  ((Norm . Right . SexyInteger . read) <$> PCP.try (PCP.many1 PCP.digit))
-    <|> -- Reserved
-    ((\k -> May.fromMaybe (Norm . Left . Message $ k ++ " is not reserved")
-       (Map.lookup k sexyReserved))
-      <$> PCP.try (PCP.choice $ map PCP.string (Map.keys sexyReserved)))
-    <|> ((Norm . Right . SexyAtom) <$> PCP.try (P.try $ PCP.many1 ((P.try parseEscape) <|> PCP.noneOf ")")))
-
-parseEscape :: PCP.Parser Char
-parseEscape = do
-  _ <- PCP.char '\\'
-  PCP.anyToken
-
-evalSexyCommand :: SexyCommand -> (SexyEnv -> Sexy -> Sexy -> SexyReturn)
-evalSexyCommand (Function (_, sexyFunc))  = sexyFunc
-evalSexyCommand (SpecialForm (_, spForm)) = spForm
-evalSexyCommand (UnknownCommand _)        = sexyUnkownFunc
-
-evalSexy :: SexyEnv -> Sexy -> SexyReturn
+evalSexy :: SexyEnv -> Sexy -> (SexyEnv, Sexy)
 evalSexy e sexy =
   case sexy of
-    NonNorm (func@(Function _), sexy0, sexy1)
-      -> (\(x, y, z) -> evalSexyCommand func x y z)
-         $ case ((evalSexy e sexy0), (evalSexy e sexy1)) of
-             ((_, val0), (_, val1)) -> (-- (Map.unions [env1, env0, e])
-               e, val0, val1)
-    NonNorm (spForm@(SpecialForm _), sexy0, sexy1)
-      -> (evalSexyCommand spForm e sexy0 sexy1)
-    -- val@(Norm (SexyInteger _))    -> (e, val)
-    NonNorm (unknown@(UnknownCommand _), sexy0, sexy1)
-      -> (evalSexyCommand unknown e sexy0 sexy1)
-    val@(Norm (Right (SexyAtom sexyKey))) ->
-      May.maybe (e, val) (evalSexy e) $ Map.lookup sexyKey (Map.unions [e, sexyReserved])
+    NonNorm ((SexyAtom atom), sexy0, sexy1) ->
+      May.maybe
+      (e, SexyError
+        $ "invalid Function or invalid SpecialForm " ++ atom ++ " got arguments " ++ show sexy0 ++ " and " ++ show sexy1)
+      (\x -> matchCommands e x sexy0 sexy1)
+      $ e !? atom
+    val@(SexyAtom sexyKey) ->
+      (e, May.fromMaybe (val) $ e !? sexyKey)
     val -> (e, val)
-    -- val@(Norm (SexyCouple _))       -> (e, val)
-    -- val@(Norm (SexyError _))      -> (e, val)
-    -- val@(Norm SexyVoid)           -> (e, val)
-    -- val@(Norm EOF)                -> (e, val)
 
--- flushStr :: String -> IO ()
--- flushStr str = putStr str >> IO.hFlush IO.stdout
+matchCommands :: SexyEnv -> Sexy -> Sexy -> Sexy -> (SexyEnv, Sexy)
+matchCommands e (SexyFunction func) sexy0 sexy1 =
+  case (evalSexy e sexy0, evalSexy e sexy1) of
+    ((_, eSexy0), (_, eSexy1)) ->
+      case (func e eSexy0 eSexy1) of
+        (_, ret) -> (e, ret)
+matchCommands e (SexySpecialForm spform) sexy0 sexy1 =
+  case (spform e sexy0 sexy1) of
+       (_, ret) -> (e, ret)
+matchCommands e atom sexy0 sexy1 =
+  (e, SexyError
+        $ "invalid Function or invalid SpecialForm " ++ show atom ++ " got arguments " ++ show sexy0 ++ " and " ++ show sexy1)
 
 repSexy :: SexyEnv -> Maybe String -> HLine.InputT IO ()
 repSexy sexyEnv (Just input) = do
-    (\(x, y) -> do {HLine.outputStrLn . TLazy.unpack . PrettyS.pShow $ (x,y)
+    (\(x, y) -> do {HLine.outputStrLn . TLazy.unpack . PrettyS.pShow $ y
                    ; replSexy x})
       $ evalSexy sexyEnv
   -- HLine.outputStrLn . TLazy.unpack . PrettyS.pShow
-      $ E.either (Norm . Left . Message . show) id $ P.parse parseSexy "" input
+      $ E.either (SexyError . show) id $ P.parse parseSexy "" input
 repSexy _ Nothing = do
   HLine.outputStrLn . TLazy.unpack . PrettyS.pString $ "(SexyFarewell: Bye!)"
 
@@ -336,6 +301,6 @@ main :: IO ()
 main = do
   args <- Env.getArgs
   HLine.runInputT HLine.defaultSettings $ May.maybe
-    (replSexy Map.empty)
-    (\x -> repSexy Map.empty (Just x))
+    (replSexy sexyFuncs)
+    (\x -> repSexy (Map.empty) (Just x))
     $ Safe.headMay args
