@@ -1,1 +1,1 @@
-# SExprCalc
+# SexyCalc
